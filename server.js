@@ -101,6 +101,17 @@ app.post("/login", async (req, res) => {
   }
 });
 
+app.get("/me", async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(" ")[1];
+    if (!token) return res.status(401).json({ error: "No token" });
+    const { email } = jwt.verify(token, JWT_SECRET);
+    res.json({ email });
+  } catch {
+    res.status(401).json({ error: "Invalid token" });
+  }
+});
+
 // === PROTECTED: SAVE NOTE (Admin only) ===
 app.post("/notes", async (req, res) => {
   try {
