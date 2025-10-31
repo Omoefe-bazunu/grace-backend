@@ -24,13 +24,13 @@ const app = express();
 app.use(express.json({ limit: "150mb" })); // Allow large payloads
 app.use(cors());
 
-const JWT_SECRET = "CHANGE_ME_TO_STRONG_SECRET_2025"; // CHANGE THIS!
+const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 4000;
 
 // === FIREBASE ADMIN SETUP ===
 admin.initializeApp({
   credential: admin.credential.cert("./serviceAccountKey.json"),
-  storageBucket: "grace-cc555.appspot.com", // Your bucket
+  storageBucket: "grace-cc555.appspot.com",
 });
 
 const db = admin.firestore();
