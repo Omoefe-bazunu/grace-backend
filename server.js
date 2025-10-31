@@ -106,6 +106,59 @@ app.post("/api/:collection", authenticate, requireAdmin, async (req, res) => {
   }
 });
 
+// === SINGLE DOC GET ===
+app.get("/api/:collection", authenticate, async (req, res) => {
+  try {
+    const { collection } = req.params;
+    const { limit } = req.query;
+
+    let q = db.collection(collection);
+    if (limit) q = q.orderBy("createdAt", "desc").limit(parseInt(limit));
+
+    const snapshot = await q.get();
+    const data = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    res.json(data);
+  } catch (err) {
+    console.error("GET /api error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// === READ NOTICES BY USER (subcollection) ===
+app.post("/api/users/:userId/readNotices", authenticate, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { noticeId } = req.body;
+    if (req.user.email !== userId)
+      return res.status(403).json({ error: "Forbidden" });
+    await db
+      .collection("users")
+      .doc(userId)
+      .collection("readNotices")
+      .doc(noticeId)
+      .set({ readAt: new Date() });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/users/:userId/readNotices", authenticate, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (req.user.email !== userId)
+      return res.status(403).json({ error: "Forbidden" });
+    const snap = await db
+      .collection("users")
+      .doc(userId)
+      .collection("readNotices")
+      .get();
+    res.json(snap.docs.map((d) => d.id));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // === UPLOAD FILE (respects Storage rules) ===
 const sizeLimitsMB = {
   notices: 10,
