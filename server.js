@@ -15,7 +15,7 @@ app.use(cors());
 const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 4000;
 
-// === Firebase Admin (bypasses rules) ===
+// === Firebase Admin ===
 admin.initializeApp({
   credential: admin.credential.cert("./serviceAccountKey.json"),
   storageBucket: "grace-cc555.appspot.com",
@@ -23,7 +23,7 @@ admin.initializeApp({
 const db = admin.firestore();
 const bucket = admin.storage().bucket();
 
-// === JWT Auth Middleware ===
+// === JWT Auth ===
 const authenticate = (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
   if (!token) return res.status(401).json({ error: "No token" });
@@ -37,14 +37,17 @@ const authenticate = (req, res, next) => {
 
 const requireAdmin = async (req, res, next) => {
   try {
-    const uid = req.user.email;
-    const adminDoc = await db.collection("admins").doc(uid).get();
+    const adminDoc = await db.collection("admins").doc(req.user.email).get();
     if (!adminDoc.exists) throw new Error("Admin required");
     next();
   } catch {
     res.status(403).json({ error: "Admin access required" });
   }
 };
+
+// === Helper: Convert Firestore Timestamp to ISO string ===
+const toISO = (field) =>
+  field?.toDate?.()?.toISOString() || new Date().toISOString();
 
 // === AUTH ===
 app.post("/register", async (req, res) => {
@@ -75,19 +78,51 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// === READ ANY COLLECTION (requires auth per rules) ===
+// === READ: List collection (with limit) ===
 app.get("/api/:collection", authenticate, async (req, res) => {
   try {
     const { collection } = req.params;
-    const snapshot = await db.collection(collection).get();
-    const data = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    const { limit } = req.query;
+
+    let q = db.collection(collection);
+    if (limit) q = q.orderBy("createdAt", "desc").limit(parseInt(limit));
+
+    const snapshot = await q.get();
+    const data = snapshot.docs.map((doc) => {
+      const d = doc.data();
+      return {
+        id: doc.id,
+        ...d,
+        createdAt: toISO(d.createdAt),
+      };
+    });
     res.json(data);
   } catch (err) {
+    console.error("GET /api/:collection error:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// === WRITE TO ADMIN-ONLY COLLECTIONS ===
+// === READ: Single document ===
+app.get("/api/:collection/:id", authenticate, async (req, res) => {
+  try {
+    const { collection, id } = req.params;
+    const doc = await db.collection(collection).doc(id).get();
+    if (!doc.exists) return res.status(404).json({ error: "Not found" });
+
+    const d = doc.data();
+    res.json({
+      id: doc.id,
+      ...d,
+      createdAt: toISO(d.createdAt),
+    });
+  } catch (err) {
+    console.error("GET /api/:collection/:id error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// === WRITE: Admin-only collections ===
 const adminCollections = ["sermons", "songs", "videos", "notices"];
 app.post("/api/:collection", authenticate, requireAdmin, async (req, res) => {
   try {
@@ -106,24 +141,6 @@ app.post("/api/:collection", authenticate, requireAdmin, async (req, res) => {
   }
 });
 
-// === SINGLE DOC GET ===
-app.get("/api/:collection", authenticate, async (req, res) => {
-  try {
-    const { collection } = req.params;
-    const { limit } = req.query;
-
-    let q = db.collection(collection);
-    if (limit) q = q.orderBy("createdAt", "desc").limit(parseInt(limit));
-
-    const snapshot = await q.get();
-    const data = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-    res.json(data);
-  } catch (err) {
-    console.error("GET /api error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // === READ NOTICES BY USER (subcollection) ===
 app.post("/api/users/:userId/readNotices", authenticate, async (req, res) => {
   try {
@@ -136,7 +153,9 @@ app.post("/api/users/:userId/readNotices", authenticate, async (req, res) => {
       .doc(userId)
       .collection("readNotices")
       .doc(noticeId)
-      .set({ readAt: new Date() });
+      .set({
+        readAt: new Date(),
+      });
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -159,7 +178,7 @@ app.get("/api/users/:userId/readNotices", authenticate, async (req, res) => {
   }
 });
 
-// === UPLOAD FILE (respects Storage rules) ===
+// === UPLOAD FILE ===
 const sizeLimitsMB = {
   notices: 10,
   sermons: 50,
@@ -175,7 +194,7 @@ const sizeLimitsMB = {
 app.post("/upload", authenticate, upload.single("file"), async (req, res) => {
   try {
     const file = req.file;
-    const { path: destPath } = req.body; // e.g., "sermons/audio.mp3"
+    const { path: destPath } = req.body;
     if (!file || !destPath)
       return res.status(400).json({ error: "File and path required" });
 
@@ -186,7 +205,6 @@ app.post("/upload", authenticate, upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: `Max ${maxMB} MB` });
     }
 
-    // Special: profiles/{userId}
     if (
       folder === "profiles" &&
       !destPath.startsWith(`profiles/${req.user.email}`)
@@ -206,14 +224,15 @@ app.post("/upload", authenticate, upload.single("file"), async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   } finally {
-    if (req.file?.path)
+    if (req.file?.path) {
       await require("fs")
         .promises.unlink(req.file.path)
         .catch(() => {});
+    }
   }
 });
 
 // === HEALTH ===
 app.get("/health", (req, res) => res.json({ status: "ok", time: new Date() }));
 
-app.listen(PORT, () => console.log(`Backend on ${PORT}`));
+app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
