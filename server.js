@@ -78,14 +78,25 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// === READ: List collection (with limit) ===
+// === READ: List collection (with category filter & limit) ===
 app.get("/api/:collection", authenticate, async (req, res) => {
   try {
     const { collection } = req.params;
-    const { limit } = req.query;
+    const { limit, category } = req.query;
 
     let q = db.collection(collection);
-    if (limit) q = q.orderBy("createdAt", "desc").limit(parseInt(limit));
+
+    // Filter by category (only for sermons)
+    if (collection === "sermons" && category) {
+      q = q.where("category", "==", category);
+    }
+
+    // Apply limit + sort
+    if (limit) {
+      q = q.orderBy("createdAt", "desc").limit(parseInt(limit));
+    } else {
+      q = q.orderBy("createdAt", "desc");
+    }
 
     const snapshot = await q.get();
     const data = snapshot.docs.map((doc) => {
@@ -98,7 +109,7 @@ app.get("/api/:collection", authenticate, async (req, res) => {
     });
     res.json(data);
   } catch (err) {
-    console.error("GET /api/:collection error:", err);
+    console.error(`GET /api/${req.params.collection} error:`, err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -153,9 +164,7 @@ app.post("/api/users/:userId/readNotices", authenticate, async (req, res) => {
       .doc(userId)
       .collection("readNotices")
       .doc(noticeId)
-      .set({
-        readAt: new Date(),
-      });
+      .set({ readAt: new Date() });
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
