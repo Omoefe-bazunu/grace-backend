@@ -7,7 +7,6 @@ const admin = require("firebase-admin");
 const cors = require("cors");
 const multer = require("multer");
 const fs = require("fs").promises;
-const path = require("path");
 
 const app = express();
 app.use(express.json({ limit: "150mb" }));
@@ -22,19 +21,21 @@ if (!JWT_SECRET) {
 }
 
 // === Firebase Admin ===
+let bucket;
 try {
+  const serviceAccount = require("./serviceAccountKey.json");
   admin.initializeApp({
-    credential: admin.credential.cert("./serviceAccountKey.json"),
-    storageBucket: "grace-cc555.appspot.com",
+    credential: admin.credential.cert(serviceAccount),
+    storageBucket: "grace-cc555.appspot.com", // MUST match Firebase project
   });
-  console.log("Firebase Admin OK");
+  bucket = admin.storage().bucket();
+  console.log("Firebase Admin + Bucket OK");
 } catch (err) {
-  console.error("Firebase init failed:", err);
+  console.error("Firebase init failed:", err.message);
   process.exit(1);
 }
 
 const db = admin.firestore();
-const bucket = admin.storage().bucket();
 
 // === Multer ===
 const upload = multer({
@@ -42,7 +43,7 @@ const upload = multer({
   limits: { fileSize: 150 * 1024 * 1024 },
 });
 
-// === Auth Middleware ===
+// === Auth ===
 const authenticate = (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
   if (!token) return res.status(401).json({ error: "No token" });
@@ -64,7 +65,6 @@ const requireAdmin = async (req, res, next) => {
   }
 };
 
-// === Helper ===
 const toISO = (field) => (field?.toDate?.() || new Date()).toISOString();
 
 // === AUTH ===
@@ -74,8 +74,8 @@ app.post("/register", async (req, res) => {
     if (!email || !password)
       return res.status(400).json({ error: "Email & password required" });
 
-    const existing = await db.collection("users").doc(email).get();
-    if (existing.exists) return res.status(409).json({ error: "User exists" });
+    const exists = await db.collection("users").doc(email).get();
+    if (exists.exists) return res.status(409).json({ error: "User exists" });
 
     const hash = await bcrypt.hash(password, 10);
     await db
@@ -109,18 +109,16 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// === READ: List ===
+// === READ ===
 app.get("/api/:collection", authenticate, async (req, res) => {
   try {
     const { collection } = req.params;
     const { limit, category } = req.query;
-
     let q = db.collection(collection).orderBy("createdAt", "desc");
 
     if (collection === "sermons" && category) {
       q = q.where("category", "==", category);
     }
-
     if (limit) q = q.limit(parseInt(limit));
 
     const snap = await q.get();
@@ -134,13 +132,11 @@ app.get("/api/:collection", authenticate, async (req, res) => {
   }
 });
 
-// === READ: Single ===
 app.get("/api/:collection/:id", authenticate, async (req, res) => {
   try {
     const { collection, id } = req.params;
     const doc = await db.collection(collection).doc(id).get();
     if (!doc.exists) return res.status(404).json({ error: "Not found" });
-
     const d = doc.data();
     res.json({ id: doc.id, ...d, createdAt: toISO(d.createdAt) });
   } catch (err) {
@@ -148,15 +144,13 @@ app.get("/api/:collection/:id", authenticate, async (req, res) => {
   }
 });
 
-// === WRITE: Admin Only ===
+// === WRITE ===
 const adminCollections = ["sermons", "songs", "videos", "notices"];
-
 app.post("/api/:collection", authenticate, requireAdmin, async (req, res) => {
   try {
     const { collection } = req.params;
-    if (!adminCollections.includes(collection)) {
+    if (!adminCollections.includes(collection))
       return res.status(403).json({ error: "Not allowed" });
-    }
 
     const payload = {
       ...req.body,
@@ -164,7 +158,6 @@ app.post("/api/:collection", authenticate, requireAdmin, async (req, res) => {
       createdAt: new Date(),
     };
 
-    // Optional validation
     if (collection === "sermons") {
       if (!payload.title || !payload.category) {
         return res.status(400).json({ error: "Title & category required" });
@@ -172,46 +165,7 @@ app.post("/api/:collection", authenticate, requireAdmin, async (req, res) => {
     }
 
     const ref = await db.collection(collection).add(payload);
-    res.json({ id: ref.id, message: "Created" });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// === READ NOTICES ===
-app.post("/api/users/:userId/readNotices", authenticate, async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const { noticeId } = req.body;
-    if (req.user.email !== userId)
-      return res.status(403).json({ error: "Forbidden" });
-
-    await db
-      .collection("users")
-      .doc(userId)
-      .collection("readNotices")
-      .doc(noticeId)
-      .set({
-        readAt: new Date(),
-      });
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get("/api/users/:userId/readNotices", authenticate, async (req, res) => {
-  try {
-    const { userId } = req.params;
-    if (req.user.email !== userId)
-      return res.status(403).json({ error: "Forbidden" });
-
-    const snap = await db
-      .collection("users")
-      .doc(userId)
-      .collection("readNotices")
-      .get();
-    res.json(snap.docs.map((d) => d.id));
+    res.json({ id: ref.id });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -224,9 +178,7 @@ const sizeLimitsMB = {
   songs: 50,
   videos: 100,
   thumbnails: 10,
-  hymns: 10,
   profiles: 5,
-  assets: 10,
   temps: 100,
 };
 
@@ -235,7 +187,6 @@ app.post("/upload", authenticate, upload.single("file"), async (req, res) => {
   try {
     const file = req.file;
     const { path: destPath } = req.body;
-
     if (!file || !destPath)
       return res.status(400).json({ error: "File & path required" });
 
@@ -265,6 +216,7 @@ app.post("/upload", authenticate, upload.single("file"), async (req, res) => {
     }/${encodeURIComponent(destPath)}`;
     res.json({ url, path: destPath });
   } catch (err) {
+    console.error("Upload error:", err);
     res.status(500).json({ error: err.message });
   } finally {
     if (filePath) await fs.unlink(filePath).catch(() => {});
@@ -272,17 +224,8 @@ app.post("/upload", authenticate, upload.single("file"), async (req, res) => {
 });
 
 // === HEALTH ===
-app.get("/health", (req, res) => {
-  res.json({ status: "ok", time: new Date().toISOString() });
-});
+app.get("/health", (req, res) =>
+  res.json({ status: "ok", time: new Date().toISOString() })
+);
 
-// === 404 & Error ===
-app.use((req, res) => res.status(404).json({ error: "Not found" }));
-app.use((err, req, res, next) => {
-  console.error("Server error:", err);
-  res.status(500).json({ error: "Server error" });
-});
-
-app.listen(PORT, () => {
-  console.log(`Backend LIVE on ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Backend LIVE on ${PORT}`));
