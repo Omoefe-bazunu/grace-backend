@@ -298,6 +298,44 @@ app.post("/upload", authenticate, upload.single("file"), async (req, res) => {
   }
 });
 
+// Add to server.js (after other routes, before health check)
+
+app.post("/api/users/:userId/readNotices", authenticate, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { noticeId } = req.body;
+    if (!noticeId) return res.status(400).json({ error: "noticeId required" });
+
+    const readRef = db
+      .collection("users")
+      .doc(userId)
+      .collection("readNotices")
+      .doc(noticeId);
+    await readRef.set({ readAt: new Date() }, { merge: true });
+
+    res.json({ message: "Marked as read" });
+  } catch (err) {
+    console.error("Mark read error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/users/:userId/readNotices", authenticate, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const snapshot = await db
+      .collection("users")
+      .doc(userId)
+      .collection("readNotices")
+      .get();
+    const readIds = snapshot.docs.map((doc) => doc.id);
+    res.json(readIds);
+  } catch (err) {
+    console.error("Fetch read notices error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // === HEALTH CHECK ===
 app.get("/health", (req, res) => {
   res.json({
