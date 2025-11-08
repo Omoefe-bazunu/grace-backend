@@ -25,7 +25,7 @@ try {
   const serviceAccount = require("./serviceAccountKey.json");
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
-    storageBucket: "grace-cc555.appspot.com",
+    storageBucket: "grace-cc555.firebasestorage.app",
   });
   bucket = admin.storage().bucket();
   console.log("✓ Firebase Admin + Storage initialized successfully");
