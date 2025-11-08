@@ -566,12 +566,13 @@ app.put(
         return res.status(403).json({ error: "Operation not allowed" });
       }
 
+      // Use admin SDK: bypasses security rules
       await db
         .collection(collection)
         .doc(id)
         .update({
           ...req.body,
-          updatedAt: new Date(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
 
       res.json({ message: "Updated successfully" });
@@ -593,7 +594,9 @@ app.delete(
         return res.status(403).json({ error: "Operation not allowed" });
       }
 
+      // Use admin SDK: bypasses security rules
       await db.collection(collection).doc(id).delete();
+
       res.json({ message: "Deleted successfully" });
     } catch (err) {
       console.error("DELETE error:", err);
