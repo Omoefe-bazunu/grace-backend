@@ -1,4 +1,3 @@
-// server.js
 require("dotenv").config();
 const express = require("express");
 const jwt = require("jsonwebtoken");
@@ -16,74 +15,88 @@ const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 4000;
 
 if (!JWT_SECRET) {
-  console.error("JWT_SECRET missing");
+  console.error("JWT_SECRET missing in environment variables");
   process.exit(1);
 }
 
-// === Firebase Admin ===
+// === Firebase Admin Initialization ===
 let bucket;
 try {
   const serviceAccount = require("./serviceAccountKey.json");
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
-    storageBucket: "grace-cc555.appspot.com", // MUST match Firebase project
+    storageBucket: "grace-cc555.appspot.com",
   });
   bucket = admin.storage().bucket();
-  console.log("Firebase Admin + Bucket OK");
+  console.log("✓ Firebase Admin + Storage initialized successfully");
 } catch (err) {
-  console.error("Firebase init failed:", err.message);
+  console.error("✗ Firebase initialization failed:", err.message);
   process.exit(1);
 }
 
 const db = admin.firestore();
 
-// === Multer ===
+// === Multer Configuration ===
 const upload = multer({
   dest: "tmp/",
-  limits: { fileSize: 150 * 1024 * 1024 },
+  limits: { fileSize: 150 * 1024 * 1024 }, // 150MB
 });
 
-// === Auth ===
+// === Middleware: Authentication ===
 const authenticate = (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
-  if (!token) return res.status(401).json({ error: "No token" });
+  if (!token)
+    return res.status(401).json({ error: "No authentication token provided" });
+
   try {
     req.user = jwt.verify(token, JWT_SECRET);
     next();
-  } catch {
-    res.status(401).json({ error: "Invalid token" });
+  } catch (err) {
+    res.status(401).json({ error: "Invalid or expired token" });
   }
 };
 
+// === Middleware: Admin Check ===
 const requireAdmin = async (req, res, next) => {
   try {
-    const snap = await db.collection("admins").doc(req.user.email).get();
-    if (!snap.exists) throw new Error();
+    const adminDoc = await db.collection("admins").doc(req.user.email).get();
+    if (!adminDoc.exists) {
+      return res.status(403).json({ error: "Admin privileges required" });
+    }
     next();
-  } catch {
-    res.status(403).json({ error: "Admin required" });
+  } catch (err) {
+    res.status(403).json({ error: "Failed to verify admin status" });
   }
 };
 
-const toISO = (field) => (field?.toDate?.() || new Date()).toISOString();
+// === Helper: Convert Firestore Timestamp ===
+const toISO = (field) => {
+  if (!field) return new Date().toISOString();
+  return (field.toDate ? field.toDate() : new Date(field)).toISOString();
+};
 
-// === AUTH ===
+// === AUTH ROUTES ===
 app.post("/register", async (req, res) => {
   try {
     const { email, password } = req.body;
-    if (!email || !password)
-      return res.status(400).json({ error: "Email & password required" });
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password are required" });
+    }
 
-    const exists = await db.collection("users").doc(email).get();
-    if (exists.exists) return res.status(409).json({ error: "User exists" });
+    const userDoc = await db.collection("users").doc(email).get();
+    if (userDoc.exists) {
+      return res.status(409).json({ error: "User already exists" });
+    }
 
-    const hash = await bcrypt.hash(password, 10);
-    await db
-      .collection("users")
-      .doc(email)
-      .set({ password: hash, createdAt: new Date() });
-    res.json({ message: "User created" });
+    const hashedPassword = await bcrypt.hash(password, 10);
+    await db.collection("users").doc(email).set({
+      password: hashedPassword,
+      createdAt: new Date(),
+    });
+
+    res.json({ message: "User registered successfully" });
   } catch (err) {
+    console.error("Registration error:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -91,43 +104,58 @@ app.post("/register", async (req, res) => {
 app.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
-    if (!email || !password)
-      return res.status(400).json({ error: "Email & password required" });
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password are required" });
+    }
 
-    const snap = await db.collection("users").doc(email).get();
-    if (!snap.exists)
+    const userDoc = await db.collection("users").doc(email).get();
+    if (!userDoc.exists) {
       return res.status(401).json({ error: "Invalid credentials" });
+    }
 
-    const user = snap.data();
-    const valid = await bcrypt.compare(password, user.password);
-    if (!valid) return res.status(401).json({ error: "Invalid credentials" });
+    const userData = userDoc.data();
+    const isValidPassword = await bcrypt.compare(password, userData.password);
+    if (!isValidPassword) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
 
     const token = jwt.sign({ email }, JWT_SECRET, { expiresIn: "7d" });
     res.json({ token, email });
   } catch (err) {
+    console.error("Login error:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// === READ ===
+// === READ ROUTES ===
 app.get("/api/:collection", authenticate, async (req, res) => {
   try {
     const { collection } = req.params;
     const { limit, category } = req.query;
-    let q = db.collection(collection).orderBy("createdAt", "desc");
 
-    if (collection === "sermons" && category) {
-      q = q.where("category", "==", category);
+    let query = db.collection(collection).orderBy("createdAt", "desc");
+
+    if (category) {
+      query = query.where("category", "==", category);
     }
-    if (limit) q = q.limit(parseInt(limit));
 
-    const snap = await q.get();
-    const data = snap.docs.map((doc) => {
-      const d = doc.data();
-      return { id: doc.id, ...d, createdAt: toISO(d.createdAt) };
+    if (limit) {
+      query = query.limit(parseInt(limit));
+    }
+
+    const snapshot = await query.get();
+    const documents = snapshot.docs.map((doc) => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        ...data,
+        createdAt: toISO(data.createdAt),
+      };
     });
-    res.json(data);
+
+    res.json(documents);
   } catch (err) {
+    console.error(`Error fetching ${req.params.collection}:`, err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -136,43 +164,89 @@ app.get("/api/:collection/:id", authenticate, async (req, res) => {
   try {
     const { collection, id } = req.params;
     const doc = await db.collection(collection).doc(id).get();
-    if (!doc.exists) return res.status(404).json({ error: "Not found" });
-    const d = doc.data();
-    res.json({ id: doc.id, ...d, createdAt: toISO(d.createdAt) });
+
+    if (!doc.exists) {
+      return res.status(404).json({ error: "Document not found" });
+    }
+
+    const data = doc.data();
+    res.json({
+      id: doc.id,
+      ...data,
+      createdAt: toISO(data.createdAt),
+    });
   } catch (err) {
+    console.error(`Error fetching document:`, err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// === WRITE ===
-const adminCollections = ["sermons", "songs", "videos", "notices"];
+// === WRITE ROUTES ===
+const allowedCollections = [
+  "sermons",
+  "songs",
+  "videos",
+  "notices",
+  "quizResources",
+  "contactMessages",
+  "quizHelpQuestions",
+];
+
 app.post("/api/:collection", authenticate, requireAdmin, async (req, res) => {
   try {
     const { collection } = req.params;
-    if (!adminCollections.includes(collection))
-      return res.status(403).json({ error: "Not allowed" });
 
-    const payload = {
-      ...req.body,
-      createdBy: req.user.email,
-      createdAt: new Date(),
-    };
+    if (!allowedCollections.includes(collection)) {
+      return res
+        .status(403)
+        .json({ error: "Collection not allowed for direct writes" });
+    }
 
+    // Validation for specific collections
     if (collection === "sermons") {
-      if (!payload.title || !payload.category) {
-        return res.status(400).json({ error: "Title & category required" });
+      if (!req.body.title || !req.body.category) {
+        return res
+          .status(400)
+          .json({ error: "Title and category are required for sermons" });
+      }
+    } else if (collection === "songs") {
+      if (!req.body.title || !req.body.category || !req.body.audioUrl) {
+        return res
+          .status(400)
+          .json({
+            error: "Title, category, and audio file are required for songs",
+          });
+      }
+    } else if (collection === "videos") {
+      if (!req.body.title || !req.body.videoUrl) {
+        return res
+          .status(400)
+          .json({ error: "Title and video file are required for videos" });
+      }
+    } else if (collection === "notices") {
+      if (!req.body.title || !req.body.message) {
+        return res
+          .status(400)
+          .json({ error: "Title and message are required for notices" });
       }
     }
 
-    const ref = await db.collection(collection).add(payload);
-    res.json({ id: ref.id });
+    const payload = {
+      ...req.body,
+      uploadedBy: req.user.email,
+      createdAt: new Date(),
+    };
+
+    const docRef = await db.collection(collection).add(payload);
+    res.json({ id: docRef.id, message: "Document created successfully" });
   } catch (err) {
+    console.error(`Error creating document in ${req.params.collection}:`, err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// === UPLOAD ===
-const sizeLimitsMB = {
+// === FILE UPLOAD ROUTE ===
+const folderSizeLimits = {
   notices: 10,
   sermons: 50,
   songs: 50,
@@ -180,52 +254,92 @@ const sizeLimitsMB = {
   thumbnails: 10,
   profiles: 5,
   temps: 100,
+  hymns: 10,
+  assets: 10,
 };
 
 app.post("/upload", authenticate, upload.single("file"), async (req, res) => {
-  let filePath = null;
+  let tempFilePath = null;
+
   try {
     const file = req.file;
-    const { path: destPath } = req.body;
-    if (!file || !destPath)
-      return res.status(400).json({ error: "File & path required" });
+    const { path: destinationPath } = req.body;
 
-    filePath = file.path;
-    const folder = destPath.split("/")[0];
-    const maxMB = sizeLimitsMB[folder];
-    if (!maxMB) return res.status(400).json({ error: "Invalid folder" });
-
-    if (file.size > maxMB * 1024 * 1024) {
-      return res.status(400).json({ error: `Max ${maxMB}MB` });
+    if (!file || !destinationPath) {
+      return res
+        .status(400)
+        .json({ error: "File and destination path are required" });
     }
 
+    tempFilePath = file.path;
+    const folder = destinationPath.split("/")[0];
+    const maxSizeMB = folderSizeLimits[folder];
+
+    if (!maxSizeMB) {
+      return res.status(400).json({ error: "Invalid upload folder" });
+    }
+
+    if (file.size > maxSizeMB * 1024 * 1024) {
+      return res
+        .status(400)
+        .json({ error: `File size exceeds ${maxSizeMB}MB limit` });
+    }
+
+    // Profile folder security check
     if (
       folder === "profiles" &&
-      !destPath.startsWith(`profiles/${req.user.email}`)
+      !destinationPath.startsWith(`profiles/${req.user.email}`)
     ) {
-      return res.status(403).json({ error: "Own profile only" });
+      return res
+        .status(403)
+        .json({ error: "Can only upload to your own profile folder" });
     }
 
+    // Upload to Firebase Storage
     await bucket.upload(file.path, {
-      destination: destPath,
-      metadata: { contentType: file.mimetype },
+      destination: destinationPath,
+      metadata: {
+        contentType: file.mimetype,
+      },
     });
 
-    const url = `https://storage.googleapis.com/${
+    const publicUrl = `https://storage.googleapis.com/${
       bucket.name
-    }/${encodeURIComponent(destPath)}`;
-    res.json({ url, path: destPath });
+    }/${encodeURIComponent(destinationPath)}`;
+
+    res.json({
+      url: publicUrl,
+      path: destinationPath,
+      message: "File uploaded successfully",
+    });
   } catch (err) {
-    console.error("Upload error:", err);
+    console.error("File upload error:", err);
     res.status(500).json({ error: err.message });
   } finally {
-    if (filePath) await fs.unlink(filePath).catch(() => {});
+    // Clean up temporary file
+    if (tempFilePath) {
+      await fs.unlink(tempFilePath).catch(() => {});
+    }
   }
 });
 
-// === HEALTH ===
-app.get("/health", (req, res) =>
-  res.json({ status: "ok", time: new Date().toISOString() })
-);
+// === HEALTH CHECK ===
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    message: "Server is running",
+  });
+});
 
-app.listen(PORT, () => console.log(`Backend LIVE on ${PORT}`));
+// === ERROR HANDLER ===
+app.use((err, req, res, next) => {
+  console.error("Unhandled error:", err);
+  res.status(500).json({ error: "Internal server error" });
+});
+
+// === START SERVER ===
+app.listen(PORT, () => {
+  console.log(`✓ Server running on port ${PORT}`);
+  console.log(`✓ Health check: http://localhost:${PORT}/health`);
+});
