@@ -1,4 +1,4 @@
-// server.js
+// server.js (CORRECTED - Auth works, CRUD + notices tracking)
 require("dotenv").config();
 const express = require("express");
 const jwt = require("jsonwebtoken");
