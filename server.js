@@ -29,6 +29,7 @@ try {
   });
   bucket = admin.storage().bucket();
   console.log("✓ Firebase Admin + Storage initialized successfully");
+  console.log("✓ Bucket name:", bucket.name);
 } catch (err) {
   console.error("✗ Firebase initialization failed:", err.message);
   process.exit(1);
@@ -265,6 +266,13 @@ app.post("/upload", authenticate, upload.single("file"), async (req, res) => {
     const file = req.file;
     const { path: destinationPath } = req.body;
 
+    console.log(
+      "Upload request - File:",
+      file?.originalname,
+      "Destination:",
+      destinationPath
+    );
+
     if (!file || !destinationPath) {
       return res
         .status(400)
@@ -296,16 +304,22 @@ app.post("/upload", authenticate, upload.single("file"), async (req, res) => {
     }
 
     // Upload to Firebase Storage
-    await bucket.upload(file.path, {
+    const [uploadedFile] = await bucket.upload(file.path, {
       destination: destinationPath,
       metadata: {
         contentType: file.mimetype,
       },
+      public: true,
     });
+
+    // Make file publicly accessible
+    await uploadedFile.makePublic();
 
     const publicUrl = `https://storage.googleapis.com/${
       bucket.name
     }/${encodeURIComponent(destinationPath)}`;
+
+    console.log("Upload successful - URL:", publicUrl);
 
     res.json({
       url: publicUrl,
