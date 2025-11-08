@@ -1,3 +1,4 @@
+// server.js (updated)
 require("dotenv").config();
 const express = require("express");
 const jwt = require("jsonwebtoken");
@@ -6,14 +7,11 @@ const admin = require("firebase-admin");
 const cors = require("cors");
 const multer = require("multer");
 const fs = require("fs").promises;
-
 const app = express();
 app.use(express.json({ limit: "150mb" }));
 app.use(cors({ origin: "*" }));
-
 const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 4000;
-
 if (!JWT_SECRET) {
   console.error("JWT_SECRET missing in environment variables");
   process.exit(1);
@@ -25,7 +23,7 @@ try {
   const serviceAccount = require("./serviceAccountKey.json");
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
-    storageBucket: "grace-cc555.firebasestorage.app",
+    storageBucket: "grace-cc555.firebasestorage.app", // Fixed bucket name
   });
   bucket = admin.storage().bucket();
   console.log("✓ Firebase Admin + Storage initialized successfully");
@@ -48,7 +46,6 @@ const authenticate = (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
   if (!token)
     return res.status(401).json({ error: "No authentication token provided" });
-
   try {
     req.user = jwt.verify(token, JWT_SECRET);
     next();
@@ -83,18 +80,15 @@ app.post("/register", async (req, res) => {
     if (!email || !password) {
       return res.status(400).json({ error: "Email and password are required" });
     }
-
     const userDoc = await db.collection("users").doc(email).get();
     if (userDoc.exists) {
       return res.status(409).json({ error: "User already exists" });
     }
-
     const hashedPassword = await bcrypt.hash(password, 10);
     await db.collection("users").doc(email).set({
       password: hashedPassword,
       createdAt: new Date(),
     });
-
     res.json({ message: "User registered successfully" });
   } catch (err) {
     console.error("Registration error:", err);
@@ -108,18 +102,15 @@ app.post("/login", async (req, res) => {
     if (!email || !password) {
       return res.status(400).json({ error: "Email and password are required" });
     }
-
     const userDoc = await db.collection("users").doc(email).get();
     if (!userDoc.exists) {
       return res.status(401).json({ error: "Invalid credentials" });
     }
-
     const userData = userDoc.data();
     const isValidPassword = await bcrypt.compare(password, userData.password);
     if (!isValidPassword) {
       return res.status(401).json({ error: "Invalid credentials" });
     }
-
     const token = jwt.sign({ email }, JWT_SECRET, { expiresIn: "7d" });
     res.json({ token, email });
   } catch (err) {
@@ -133,17 +124,13 @@ app.get("/api/:collection", authenticate, async (req, res) => {
   try {
     const { collection } = req.params;
     const { limit, category } = req.query;
-
     let query = db.collection(collection).orderBy("createdAt", "desc");
-
     if (category) {
       query = query.where("category", "==", category);
     }
-
     if (limit) {
       query = query.limit(parseInt(limit));
     }
-
     const snapshot = await query.get();
     const documents = snapshot.docs.map((doc) => {
       const data = doc.data();
@@ -153,7 +140,6 @@ app.get("/api/:collection", authenticate, async (req, res) => {
         createdAt: toISO(data.createdAt),
       };
     });
-
     res.json(documents);
   } catch (err) {
     console.error(`Error fetching ${req.params.collection}:`, err);
@@ -165,11 +151,9 @@ app.get("/api/:collection/:id", authenticate, async (req, res) => {
   try {
     const { collection, id } = req.params;
     const doc = await db.collection(collection).doc(id).get();
-
     if (!doc.exists) {
       return res.status(404).json({ error: "Document not found" });
     }
-
     const data = doc.data();
     res.json({
       id: doc.id,
@@ -196,14 +180,11 @@ const allowedCollections = [
 app.post("/api/:collection", authenticate, requireAdmin, async (req, res) => {
   try {
     const { collection } = req.params;
-
     if (!allowedCollections.includes(collection)) {
       return res
         .status(403)
         .json({ error: "Collection not allowed for direct writes" });
     }
-
-    // Validation for specific collections
     if (collection === "sermons") {
       if (!req.body.title || !req.body.category) {
         return res
@@ -212,11 +193,9 @@ app.post("/api/:collection", authenticate, requireAdmin, async (req, res) => {
       }
     } else if (collection === "songs") {
       if (!req.body.title || !req.body.category || !req.body.audioUrl) {
-        return res
-          .status(400)
-          .json({
-            error: "Title, category, and audio file are required for songs",
-          });
+        return res.status(400).json({
+          error: "Title, category, and audio file are required for songs",
+        });
       }
     } else if (collection === "videos") {
       if (!req.body.title || !req.body.videoUrl) {
@@ -231,13 +210,11 @@ app.post("/api/:collection", authenticate, requireAdmin, async (req, res) => {
           .json({ error: "Title and message are required for notices" });
       }
     }
-
     const payload = {
       ...req.body,
       uploadedBy: req.user.email,
       createdAt: new Date(),
     };
-
     const docRef = await db.collection(collection).add(payload);
     res.json({ id: docRef.id, message: "Document created successfully" });
   } catch (err) {
@@ -261,39 +238,31 @@ const folderSizeLimits = {
 
 app.post("/upload", authenticate, upload.single("file"), async (req, res) => {
   let tempFilePath = null;
-
   try {
     const file = req.file;
     const { path: destinationPath } = req.body;
-
     console.log(
       "Upload request - File:",
       file?.originalname,
       "Destination:",
       destinationPath
     );
-
     if (!file || !destinationPath) {
       return res
         .status(400)
         .json({ error: "File and destination path are required" });
     }
-
     tempFilePath = file.path;
     const folder = destinationPath.split("/")[0];
     const maxSizeMB = folderSizeLimits[folder];
-
     if (!maxSizeMB) {
       return res.status(400).json({ error: "Invalid upload folder" });
     }
-
     if (file.size > maxSizeMB * 1024 * 1024) {
       return res
         .status(400)
         .json({ error: `File size exceeds ${maxSizeMB}MB limit` });
     }
-
-    // Profile folder security check
     if (
       folder === "profiles" &&
       !destinationPath.startsWith(`profiles/${req.user.email}`)
@@ -302,8 +271,6 @@ app.post("/upload", authenticate, upload.single("file"), async (req, res) => {
         .status(403)
         .json({ error: "Can only upload to your own profile folder" });
     }
-
-    // Upload to Firebase Storage
     const [uploadedFile] = await bucket.upload(file.path, {
       destination: destinationPath,
       metadata: {
@@ -311,16 +278,11 @@ app.post("/upload", authenticate, upload.single("file"), async (req, res) => {
       },
       public: true,
     });
-
-    // Make file publicly accessible
     await uploadedFile.makePublic();
-
     const publicUrl = `https://storage.googleapis.com/${
       bucket.name
     }/${encodeURIComponent(destinationPath)}`;
-
     console.log("Upload successful - URL:", publicUrl);
-
     res.json({
       url: publicUrl,
       path: destinationPath,
@@ -330,7 +292,6 @@ app.post("/upload", authenticate, upload.single("file"), async (req, res) => {
     console.error("File upload error:", err);
     res.status(500).json({ error: err.message });
   } finally {
-    // Clean up temporary file
     if (tempFilePath) {
       await fs.unlink(tempFilePath).catch(() => {});
     }
