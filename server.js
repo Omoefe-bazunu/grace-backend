@@ -357,6 +357,57 @@ app.get("/api/users/:userId/readNotices", authenticate, async (req, res) => {
   }
 });
 
+// === TEXT-TO-SPEECH ROUTE ===
+app.post("/api/tts/synthesize", async (req, res) => {
+  const { text, languageCode, voiceName } = req.body;
+
+  // Validation
+  if (!text || !languageCode || !voiceName) {
+    return res.status(400).json({
+      error: "Missing required fields: text, languageCode, voiceName",
+    });
+  }
+
+  try {
+    const response = await fetch(
+      `https://texttospeech.googleapis.com/v1/text:synthesize?key=${process.env.GOOGLE_TTS_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          input: { text },
+          voice: { languageCode, name: voiceName },
+          audioConfig: {
+            audioEncoding: "MP3",
+            speakingRate: 1.0,
+            pitch: 0.0,
+            volumeGainDb: 0.0,
+          },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error("Google TTS API Error:", errorText);
+      return res.status(response.status).json({
+        error: `TTS API error: ${response.statusText}`,
+      });
+    }
+
+    const data = await response.json();
+
+    if (!data.audioContent) {
+      return res.status(500).json({ error: "No audio content received" });
+    }
+
+    res.json({ audioContent: data.audioContent });
+  } catch (error) {
+    console.error("TTS Error:", error);
+    res.status(500).json({ error: "TTS generation failed: " + error.message });
+  }
+});
+
 // === HEALTH CHECK ===
 app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
