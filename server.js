@@ -583,7 +583,7 @@
 //   console.log(`Health check: http://localhost:${PORT}/health`);
 // });
 
-// server.js (with Pagination Support)
+// server.js (with TTS Pre-generation & Caching)
 require("dotenv").config();
 const express = require("express");
 const jwt = require("jsonwebtoken");
@@ -771,194 +771,15 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// === READ ROUTES WITH PAGINATIONS ===
+// === READ ROUTES ===
 app.get("/api/:collection", authenticate, async (req, res) => {
   try {
     const { collection } = req.params;
-    const {
-      limit = 10,
-      category,
-      after, // Document ID to start after (cursor-based pagination)
-      sort = "createdAt",
-      order = "desc",
-    } = req.query;
-
-    console.log(
-      `GET /${collection} - Category: ${category}, After: ${after}, Limit: ${limit}`
-    );
-
-    // Build the base query
-    let query = db.collection(collection);
-
-    // IMPORTANT FIX: Apply category filter BEFORE orderBy
-    if (category) {
-      console.log(`Applying category filter: ${category}`);
-      query = query.where("category", "==", category);
-    }
-
-    // Apply ordering
-    query = query.orderBy(sort, order);
-
-    // Apply cursor pagination if 'after' is provided
-    if (after) {
-      try {
-        const lastDoc = await db.collection(collection).doc(after).get();
-        if (lastDoc.exists) {
-          query = query.startAfter(lastDoc);
-          console.log(`Starting after document: ${after}`);
-        } else {
-          console.warn(`Document ${after} not found, ignoring cursor`);
-        }
-      } catch (cursorError) {
-        console.error(`Error fetching cursor document:`, cursorError);
-        // Continue without cursor if there's an error
-      }
-    }
-
-    // Apply limit
-    query = query.limit(parseInt(limit));
-
-    // Execute query
-    const snapshot = await query.get();
-
-    console.log(`Query returned ${snapshot.docs.length} documents`);
-
-    const docs = snapshot.docs.map((doc) => {
-      const data = doc.data();
-      return {
-        id: doc.id,
-        ...data,
-        createdAt: toISO(data.createdAt),
-      };
-    });
-
-    // Get the last document for next cursor
-    const lastDoc = docs.length > 0 ? docs[docs.length - 1] : null;
-
-    const response = {
-      [collection]: docs,
-      pagination: {
-        hasMore: docs.length === parseInt(limit),
-        nextCursor: lastDoc ? lastDoc.id : null,
-        count: docs.length,
-      },
-    };
-
-    console.log(
-      `Response: ${docs.length} items, hasMore: ${response.pagination.hasMore}`
-    );
-
-    res.json(response);
-  } catch (err) {
-    console.error("GET collection error:", err);
-
-    // Send detailed error in development
-    res.status(500).json({
-      error: err.message,
-      details: process.env.NODE_ENV === "development" ? err.stack : undefined,
-    });
-  }
-});
-
-// ALTERNATIVE: If Firestore composite index is missing, use this fallback
-app.get("/api/:collection/no-index", authenticate, async (req, res) => {
-  try {
-    const { collection } = req.params;
-    const {
-      limit = 10,
-      category,
-      after,
-      sort = "createdAt",
-      order = "desc",
-    } = req.query;
-
-    console.log(`GET /${collection}/no-index - Category: ${category}`);
-
-    // Fetch all documents (or a larger batch)
-    let query = db.collection(collection);
-
-    // Only apply orderBy, no category filter in query
-    query = query.orderBy(sort, order).limit(parseInt(limit) * 10);
-
-    const snapshot = await query.get();
-
-    let docs = snapshot.docs.map((doc) => {
-      const data = doc.data();
-      return {
-        id: doc.id,
-        ...data,
-        createdAt: toISO(data.createdAt),
-      };
-    });
-
-    // Filter by category in memory (client-side filtering on server)
-    if (category) {
-      docs = docs.filter((doc) => doc.category === category);
-    }
-
-    // Apply cursor pagination in memory
-    if (after) {
-      const afterIndex = docs.findIndex((doc) => doc.id === after);
-      if (afterIndex !== -1) {
-        docs = docs.slice(afterIndex + 1);
-      }
-    }
-
-    // Apply limit
-    docs = docs.slice(0, parseInt(limit));
-
-    const lastDoc = docs.length > 0 ? docs[docs.length - 1] : null;
-
-    res.json({
-      [collection]: docs,
-      pagination: {
-        hasMore: docs.length === parseInt(limit),
-        nextCursor: lastDoc ? lastDoc.id : null,
-        count: docs.length,
-      },
-    });
-  } catch (err) {
-    console.error("GET collection (no-index) error:", err);
-    res.status(500).json({
-      error: err.message,
-      details: process.env.NODE_ENV === "development" ? err.stack : undefined,
-    });
-  }
-});
-
-// Alternative: Offset-based pagination (for simpler use cases)
-app.get("/api/:collection/offset", authenticate, async (req, res) => {
-  try {
-    const { collection } = req.params;
-    const {
-      limit = 10,
-      category,
-      page = 1,
-      sort = "createdAt",
-      order = "desc",
-    } = req.query;
-
-    let query = db.collection(collection).orderBy(sort, order);
+    const { limit, category } = req.query;
+    let query = db.collection(collection).orderBy("createdAt", "desc");
 
     if (category) query = query.where("category", "==", category);
-
-    // Apply offset pagination
-    const pageNum = parseInt(page);
-    const limitNum = parseInt(limit);
-    const offset = (pageNum - 1) * limitNum;
-
-    // Get total count for pagination metadata
-    let totalCount = 0;
-    if (pageNum === 1) {
-      const countQuery = category
-        ? db.collection(collection).where("category", "==", category)
-        : db.collection(collection);
-      const countSnapshot = await countQuery.get();
-      totalCount = countSnapshot.size;
-    }
-
-    // Apply pagination to query
-    query = query.limit(limitNum).offset(offset);
+    if (limit) query = query.limit(parseInt(limit));
 
     const snapshot = await query.get();
     const docs = snapshot.docs.map((doc) => ({
@@ -967,19 +788,9 @@ app.get("/api/:collection/offset", authenticate, async (req, res) => {
       createdAt: toISO(doc.data().createdAt),
     }));
 
-    // Return paginated response
-    res.json({
-      [collection]: docs,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        totalCount,
-        hasMore: docs.length === limitNum,
-        totalPages: totalCount ? Math.ceil(totalCount / limitNum) : 0,
-      },
-    });
+    res.json(docs);
   } catch (err) {
-    console.error("GET collection with offset error:", err);
+    console.error("GET collection error:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1355,7 +1166,4 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/health`);
-  console.log(`Pagination endpoints available:`);
-  console.log(`- GET /api/:collection (cursor-based)`);
-  console.log(`- GET /api/:collection/offset (offset-based)`);
 });
