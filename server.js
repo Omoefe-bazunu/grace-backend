@@ -771,7 +771,7 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// === READ ROUTES WITH PAGINATION ===
+// === READ ROUTES WITH PAGINATIONS ===
 app.get("/api/:collection", authenticate, async (req, res) => {
   try {
     const { collection } = req.params;
