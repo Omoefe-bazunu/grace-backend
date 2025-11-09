@@ -1,4 +1,4 @@
-// // server.js (CORRECTED - Auth works, CRUD + notices tracking)
+// // server.js (with TTS Pre-generation & Caching)
 // require("dotenv").config();
 // const express = require("express");
 // const jwt = require("jsonwebtoken");
@@ -75,6 +75,69 @@
 //   if (!field) return new Date().toISOString();
 //   if (field.toDate) return field.toDate().toISOString();
 //   return new Date(field).toISOString();
+// };
+
+// // === TTS HELPER FUNCTIONS ===
+// const MAX_CHARS_PER_CHUNK = 4000;
+// const SENTENCE_ENDINGS = /[.!?]+/;
+
+// const splitTextIntoChunks = (text) => {
+//   if (!text) return [];
+//   const chunks = [];
+//   let currentChunk = "";
+//   const sentences = text.split(SENTENCE_ENDINGS);
+
+//   for (const sentence of sentences) {
+//     const sentenceWithPunctuation =
+//       sentence + (text[text.indexOf(sentence) + sentence.length] || ".");
+
+//     if (
+//       (currentChunk + sentenceWithPunctuation).length <= MAX_CHARS_PER_CHUNK
+//     ) {
+//       currentChunk += sentenceWithPunctuation;
+//     } else {
+//       if (currentChunk) chunks.push(currentChunk.trim());
+//       currentChunk = sentenceWithPunctuation;
+//     }
+//   }
+
+//   if (currentChunk.trim()) chunks.push(currentChunk.trim());
+//   return chunks;
+// };
+
+// const generateTTSChunk = async (text, languageCode, voiceName) => {
+//   const response = await fetch(
+//     `https://texttospeech.googleapis.com/v1/text:synthesize?key=${process.env.GOOGLE_TTS_API_KEY}`,
+//     {
+//       method: "POST",
+//       headers: { "Content-Type": "application/json" },
+//       body: JSON.stringify({
+//         input: { text },
+//         voice: { languageCode, name: voiceName },
+//         audioConfig: {
+//           audioEncoding: "MP3",
+//           speakingRate: 1.0,
+//           pitch: 0.0,
+//           volumeGainDb: 0.0,
+//         },
+//       }),
+//     }
+//   );
+
+//   if (!response.ok) {
+//     const errorText = await response.text();
+//     throw new Error(`TTS failed: ${response.status} - ${errorText}`);
+//   }
+
+//   const data = await response.json();
+//   return data.audioContent;
+// };
+
+// const mergeAudioChunks = (base64Chunks) => {
+//   // Simple concatenation for MP3 (works for most cases)
+//   // For production, consider using ffmpeg for proper merging
+//   const buffers = base64Chunks.map((chunk) => Buffer.from(chunk, "base64"));
+//   return Buffer.concat(buffers);
 // };
 
 // // === AUTH ROUTES ===
@@ -207,7 +270,6 @@
 //         return res.status(403).json({ error: "Operation not allowed" });
 //       }
 
-//       // Use admin SDK: bypasses security rules
 //       await db
 //         .collection(collection)
 //         .doc(id)
@@ -235,7 +297,6 @@
 //         return res.status(403).json({ error: "Operation not allowed" });
 //       }
 
-//       // Use admin SDK: bypasses security rules
 //       await db.collection(collection).doc(id).delete();
 
 //       res.json({ message: "Deleted successfully" });
@@ -318,6 +379,155 @@
 //   }
 // });
 
+// // === TTS ROUTES ===
+
+// // On-demand TTS (fallback for old sermons or immediate playback)
+// app.post("/api/tts/synthesize", async (req, res) => {
+//   const { text, languageCode, voiceName } = req.body;
+
+//   if (!text || !languageCode || !voiceName) {
+//     return res.status(400).json({
+//       error: "Missing required fields: text, languageCode, voiceName",
+//     });
+//   }
+
+//   try {
+//     const audioContent = await generateTTSChunk(text, languageCode, voiceName);
+//     res.json({ audioContent });
+//   } catch (error) {
+//     console.error("TTS Error:", error);
+//     res.status(500).json({ error: "TTS generation failed: " + error.message });
+//   }
+// });
+
+// // Pre-generate TTS for entire sermon (MAIN ENDPOINT)
+// app.post(
+//   "/api/sermons/:id/generate-audio",
+//   authenticate,
+//   requireAdmin,
+//   async (req, res) => {
+//     try {
+//       const { id } = req.params;
+//       const { languageCode = "en-US", voiceName = "en-US-Neural2-F" } =
+//         req.body;
+
+//       console.log(`Starting TTS generation for sermon ${id}`);
+
+//       // Get sermon
+//       const sermonDoc = await db.collection("sermons").doc(id).get();
+//       if (!sermonDoc.exists) {
+//         return res.status(404).json({ error: "Sermon not found" });
+//       }
+
+//       const sermonData = sermonDoc.data();
+
+//       // Check if already generated
+//       if (sermonData.ttsAudioUrl) {
+//         console.log(`Sermon ${id} already has TTS audio`);
+//         return res.json({
+//           url: sermonData.ttsAudioUrl,
+//           cached: true,
+//           message: "Audio already exists",
+//         });
+//       }
+
+//       // Check if content exists
+//       if (!sermonData.content) {
+//         return res
+//           .status(400)
+//           .json({ error: "Sermon has no content to generate audio from" });
+//       }
+
+//       // Split into chunks
+//       const chunks = splitTextIntoChunks(sermonData.content);
+//       console.log(`Split sermon into ${chunks.length} chunks`);
+
+//       // Generate TTS for each chunk
+//       const audioChunks = [];
+//       for (let i = 0; i < chunks.length; i++) {
+//         console.log(`Generating chunk ${i + 1}/${chunks.length}`);
+//         const audioContent = await generateTTSChunk(
+//           chunks[i],
+//           languageCode,
+//           voiceName
+//         );
+//         audioChunks.push(audioContent);
+//       }
+
+//       // Merge audio chunks
+//       console.log("Merging audio chunks...");
+//       const mergedAudio = mergeAudioChunks(audioChunks);
+
+//       // Upload to Firebase Storage
+//       const audioPath = `sermons/tts/${id}_${languageCode}.mp3`;
+//       const file = bucket.file(audioPath);
+
+//       await file.save(mergedAudio, {
+//         contentType: "audio/mpeg",
+//         public: true,
+//         metadata: {
+//           contentType: "audio/mpeg",
+//           metadata: {
+//             generatedAt: new Date().toISOString(),
+//             languageCode,
+//             voiceName,
+//             chunkCount: chunks.length,
+//           },
+//         },
+//       });
+
+//       await file.makePublic();
+//       const publicUrl = `https://storage.googleapis.com/${
+//         bucket.name
+//       }/${encodeURIComponent(audioPath)}`;
+
+//       // Update sermon document
+//       await db.collection("sermons").doc(id).update({
+//         ttsAudioUrl: publicUrl,
+//         ttsGeneratedAt: new Date(),
+//         ttsLanguageCode: languageCode,
+//         ttsVoiceName: voiceName,
+//       });
+
+//       console.log(`TTS generation complete for sermon ${id}`);
+//       res.json({
+//         url: publicUrl,
+//         cached: false,
+//         chunks: chunks.length,
+//         message: "Audio generated successfully",
+//       });
+//     } catch (error) {
+//       console.error("TTS generation error:", error);
+//       res
+//         .status(500)
+//         .json({ error: "Failed to generate audio: " + error.message });
+//     }
+//   }
+// );
+
+// // Check TTS generation status
+// app.get("/api/sermons/:id/audio-status", authenticate, async (req, res) => {
+//   try {
+//     const { id } = req.params;
+//     const sermonDoc = await db.collection("sermons").doc(id).get();
+
+//     if (!sermonDoc.exists) {
+//       return res.status(404).json({ error: "Sermon not found" });
+//     }
+
+//     const data = sermonDoc.data();
+//     res.json({
+//       hasAudio: !!data.ttsAudioUrl,
+//       url: data.ttsAudioUrl || null,
+//       generatedAt: data.ttsGeneratedAt ? toISO(data.ttsGeneratedAt) : null,
+//       languageCode: data.ttsLanguageCode || null,
+//     });
+//   } catch (error) {
+//     console.error("Status check error:", error);
+//     res.status(500).json({ error: error.message });
+//   }
+// });
+
 // // === READ NOTICES TRACKING ===
 // app.post("/api/users/:userId/readNotices", authenticate, async (req, res) => {
 //   try {
@@ -357,57 +567,6 @@
 //   }
 // });
 
-// // === TEXT-TO-SPEECH ROUTE ===
-// app.post("/api/tts/synthesize", async (req, res) => {
-//   const { text, languageCode, voiceName } = req.body;
-
-//   // Validation
-//   if (!text || !languageCode || !voiceName) {
-//     return res.status(400).json({
-//       error: "Missing required fields: text, languageCode, voiceName",
-//     });
-//   }
-
-//   try {
-//     const response = await fetch(
-//       `https://texttospeech.googleapis.com/v1/text:synthesize?key=${process.env.GOOGLE_TTS_API_KEY}`,
-//       {
-//         method: "POST",
-//         headers: { "Content-Type": "application/json" },
-//         body: JSON.stringify({
-//           input: { text },
-//           voice: { languageCode, name: voiceName },
-//           audioConfig: {
-//             audioEncoding: "MP3",
-//             speakingRate: 1.0,
-//             pitch: 0.0,
-//             volumeGainDb: 0.0,
-//           },
-//         }),
-//       }
-//     );
-
-//     if (!response.ok) {
-//       const errorText = await response.text();
-//       console.error("Google TTS API Error:", errorText);
-//       return res.status(response.status).json({
-//         error: `TTS API error: ${response.statusText}`,
-//       });
-//     }
-
-//     const data = await response.json();
-
-//     if (!data.audioContent) {
-//       return res.status(500).json({ error: "No audio content received" });
-//     }
-
-//     res.json({ audioContent: data.audioContent });
-//   } catch (error) {
-//     console.error("TTS Error:", error);
-//     res.status(500).json({ error: "TTS generation failed: " + error.message });
-//   }
-// });
-
 // // === HEALTH CHECK ===
 // app.get("/health", (req, res) => {
 //   res.json({ status: "ok", timestamp: new Date().toISOString() });
@@ -424,7 +583,7 @@
 //   console.log(`Health check: http://localhost:${PORT}/health`);
 // });
 
-// server.js (with TTS Pre-generation & Caching)
+// server.js (with Pagination Support)
 require("dotenv").config();
 const express = require("express");
 const jwt = require("jsonwebtoken");
@@ -612,15 +771,32 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// === READ ROUTES ===
+// === READ ROUTES WITH PAGINATION ===
 app.get("/api/:collection", authenticate, async (req, res) => {
   try {
     const { collection } = req.params;
-    const { limit, category } = req.query;
-    let query = db.collection(collection).orderBy("createdAt", "desc");
+    const {
+      limit = 10,
+      category,
+      after, // Document ID to start after (cursor-based pagination)
+      sort = "createdAt",
+      order = "desc",
+    } = req.query;
+
+    let query = db
+      .collection(collection)
+      .orderBy(sort, order)
+      .limit(parseInt(limit));
 
     if (category) query = query.where("category", "==", category);
-    if (limit) query = query.limit(parseInt(limit));
+
+    // Apply cursor pagination
+    if (after) {
+      const lastDoc = await db.collection(collection).doc(after).get();
+      if (lastDoc.exists) {
+        query = query.startAfter(lastDoc);
+      }
+    }
 
     const snapshot = await query.get();
     const docs = snapshot.docs.map((doc) => ({
@@ -629,9 +805,77 @@ app.get("/api/:collection", authenticate, async (req, res) => {
       createdAt: toISO(doc.data().createdAt),
     }));
 
-    res.json(docs);
+    // Get the last document for next cursor
+    const lastDoc = docs.length > 0 ? docs[docs.length - 1] : null;
+
+    res.json({
+      [collection]: docs,
+      pagination: {
+        hasMore: docs.length === parseInt(limit),
+        nextCursor: lastDoc ? lastDoc.id : null,
+        count: docs.length,
+      },
+    });
   } catch (err) {
     console.error("GET collection error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Alternative: Offset-based pagination (for simpler use cases)
+app.get("/api/:collection/offset", authenticate, async (req, res) => {
+  try {
+    const { collection } = req.params;
+    const {
+      limit = 10,
+      category,
+      page = 1,
+      sort = "createdAt",
+      order = "desc",
+    } = req.query;
+
+    let query = db.collection(collection).orderBy(sort, order);
+
+    if (category) query = query.where("category", "==", category);
+
+    // Apply offset pagination
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const offset = (pageNum - 1) * limitNum;
+
+    // Get total count for pagination metadata
+    let totalCount = 0;
+    if (pageNum === 1) {
+      const countQuery = category
+        ? db.collection(collection).where("category", "==", category)
+        : db.collection(collection);
+      const countSnapshot = await countQuery.get();
+      totalCount = countSnapshot.size;
+    }
+
+    // Apply pagination to query
+    query = query.limit(limitNum).offset(offset);
+
+    const snapshot = await query.get();
+    const docs = snapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+      createdAt: toISO(doc.data().createdAt),
+    }));
+
+    // Return paginated response
+    res.json({
+      [collection]: docs,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        totalCount,
+        hasMore: docs.length === limitNum,
+        totalPages: totalCount ? Math.ceil(totalCount / limitNum) : 0,
+      },
+    });
+  } catch (err) {
+    console.error("GET collection with offset error:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1007,4 +1251,7 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/health`);
+  console.log(`Pagination endpoints available:`);
+  console.log(`- GET /api/:collection (cursor-based)`);
+  console.log(`- GET /api/:collection/offset (offset-based)`);
 });
